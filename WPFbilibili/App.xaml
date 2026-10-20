@@ -1,0 +1,16 @@
+﻿<Application x:Class="WPFbilibili.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <!-- 直接将浅色主题硬编码在这里，无需额外 Themes 文件夹 -->
+        <SolidColorBrush x:Key="AppBackgroundBrush" Color="#F3F3F3"/>
+        <SolidColorBrush x:Key="SideBarBackgroundBrush" Color="#EAEAEA"/>
+        <SolidColorBrush x:Key="TextPrimaryBrush" Color="#18191C"/>
+        <SolidColorBrush x:Key="TextSecondaryBrush" Color="#9499A0"/>
+        <SolidColorBrush x:Key="DividerBrush" Color="#E5E5E5"/>
+        <SolidColorBrush x:Key="CardBackgroundBrush" Color="White"/>
+        <SolidColorBrush x:Key="InputBackgroundBrush" Color="#F4F5F7"/>
+        <SolidColorBrush x:Key="HoverBackgroundBrush" Color="#E0E0E0"/>
+    </Application.Resources>
+</Application>
