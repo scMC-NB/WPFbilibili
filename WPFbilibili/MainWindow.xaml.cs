@@ -1,4 +1,4 @@
-﻿#nullable disable
+#nullable disable
 using BiliClient;
 using LibVLCSharp.Shared;
 using LibVLCSharp.WPF;
@@ -12,6 +12,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -30,7 +31,43 @@ namespace WPFbilibili
 {
     public partial class MainWindow : Window
     {
+        // ================= 原生CMD控制台相关 =================
+        [DllImport("kernel32.dll")]
+        private static extern bool AllocConsole();
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GetConsoleWindow();
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        private bool _isConsoleShown = false;
+
+        private void ShowLogConsole()
+        {
+            if (!_isConsoleShown)
+            {
+                AllocConsole();
+                // 修正中文乱码
+                Console.OutputEncoding = Encoding.UTF8;
+                _isConsoleShown = true;
+            }
+            IntPtr hWnd = GetConsoleWindow();
+            if (hWnd != IntPtr.Zero)
+            {
+                ShowWindow(hWnd, 5); // SW_SHOW = 5
+            }
+        }
+        // =====================================================
+
         private const string UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+        private const string LocalVersionStr = "beta 2.0";
+
+        private static readonly string[] VersionUrls = new string[]
+        {
+            "https://cdn.jsdelivr.net/gh/scMC-NB/WPFbilibili@main/version.txt",
+            "https://ghproxy.net/https://raw.githubusercontent.com/scMC-NB/WPFbilibili/main/version.txt",
+            "https://raw.githubusercontent.com/scMC-NB/WPFbilibili/main/version.txt"
+        };
 
         private static readonly HttpClient client = new HttpClient(new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate });
         private static readonly HttpClient versionClient = new HttpClient();
@@ -107,22 +144,13 @@ namespace WPFbilibili
         {
             InitializeComponent();
 
-            // 显示本地版本号：利用 Assembly 读取，默认是 1.0.0.0
-            var version = Assembly.GetExecutingAssembly().GetName().Version;
-            TxtLocalVersion.Text = $"v{version.Major}.{version.Minor}.{version.Build}";
+            TxtLocalVersion.Text = $"v {LocalVersionStr}";
 
             TxtSearch.KeyDown += (s, e) => { if (e.Key == Key.Enter) BtnSearch_Click(null, null); };
-
             CommentList.ItemsSource = _comments;
 
-            TxtDanmakuInput.KeyDown += (s, e) =>
-            {
-                if (e.Key == Key.Enter) { e.Handled = true; BtnSendDanmaku_Click(null, null); }
-            };
-            TxtCommentInput.KeyDown += (s, e) =>
-            {
-                if (e.Key == Key.Enter) { e.Handled = true; BtnSendComment_Click(null, null); }
-            };
+            TxtDanmakuInput.KeyDown += (s, e) => { if (e.Key == Key.Enter) { e.Handled = true; BtnSendDanmaku_Click(null, null); } };
+            TxtCommentInput.KeyDown += (s, e) => { if (e.Key == Key.Enter) { e.Handled = true; BtnSendComment_Click(null, null); } };
 
             try
             {
@@ -135,7 +163,8 @@ namespace WPFbilibili
 
                 _mediaPlayer.EncounteredError += (s, e) => Dispatcher.InvokeAsync(() =>
                 {
-                    MessageBox.Show("VLC 播放流失败，可能该视频存在版权限制或当前网络无法连接 B站 CDN。", "播放错误");
+                    Console.WriteLine("[VLC Error] 播放流失败");
+                    MessageBox.Show("VLC 播放流失败，可能是未登录限制或网络无法连接 CDN。", "播放错误");
                 });
             }
             catch (Exception ex) { MessageBox.Show($"VLC 初始化失败: {ex.Message}"); }
@@ -145,31 +174,28 @@ namespace WPFbilibili
             Loaded += async (s, e) =>
             {
                 await EnsureBuvid3Cookie();
-                await CheckForUpdatesAsync(false); // false 代表静默检查
+                await CheckForUpdatesAsync(false);
                 await LoadHomeAsync(1, true);
             };
         }
 
-        private async void BtnCheckUpdate_Click(object sender, RoutedEventArgs e)
+        // ================= 窗口按钮与版本检查 =================
+        private void OnMinimizeClick(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+        private void OnMaximizeClick(object sender, RoutedEventArgs e)
         {
-            await CheckForUpdatesAsync(true); // true 代表手动点击，会有弹窗反馈
+            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+            MaximizeIcon.Text = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
         }
+        private void OnCloseClick(object sender, RoutedEventArgs e) => Close();
 
-        // ================= 版本更新检查 =================
+        private async void BtnCheckUpdate_Click(object sender, RoutedEventArgs e) => await CheckForUpdatesAsync(true);
+
         private async Task CheckForUpdatesAsync(bool isManual)
         {
-            // 优先使用 jsdelivr 镜像，其次使用 ghproxy，最后才是原始 github
-            string[] urls = new string[]
-            {
-                "https://cdn.jsdelivr.net/gh/scMC-NB/WPFbilibili@main/version.txt",
-                "https://ghproxy.net/https://raw.githubusercontent.com/scMC-NB/WPFbilibili/main/version.txt",
-                "https://raw.githubusercontent.com/scMC-NB/WPFbilibili/main/version.txt"
-            };
-
             string remoteRaw = null;
             Exception lastError = null;
 
-            foreach (var url in urls)
+            foreach (var url in VersionUrls)
             {
                 try
                 {
@@ -185,19 +211,12 @@ namespace WPFbilibili
                         if (!string.IsNullOrWhiteSpace(remoteRaw)) break;
                     }
                 }
-                catch (Exception ex)
-                {
-                    lastError = ex;
-                }
+                catch (Exception ex) { lastError = ex; }
             }
 
             if (string.IsNullOrWhiteSpace(remoteRaw))
             {
-                if (isManual)
-                {
-                    string errMsg = lastError != null ? lastError.Message : "获取版本文件为空";
-                    MessageBox.Show($"检查更新失败，所有线路均无法访问。\n错误信息：{errMsg}\n\n(网络问题，建议开启代理)", "检查更新", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
+                if (isManual) MessageBox.Show($"检查更新失败，所有线路均无法访问。\n错误: {lastError?.Message}", "检查更新");
                 return;
             }
 
@@ -205,31 +224,22 @@ namespace WPFbilibili
 
             if (!TryParseVersion(remoteRaw, out bool isBeta, out Version remoteVersion, out string displayVersion))
             {
-                if (isManual) MessageBox.Show($"远程版本格式无法解析：{remoteRaw}", "检查更新");
+                if (isManual) MessageBox.Show($"版本格式错误：{remoteRaw}", "检查更新");
                 return;
             }
 
-            var localAsm = Assembly.GetExecutingAssembly().GetName().Version;
-            if (localAsm == null) return;
+            TryParseVersion(LocalVersionStr, out _, out Version localVersion, out _);
 
-            // C# 的 Version 会自动补全 4 位。如果本地是 1.0.0.0，远程是 beta 1.0 (也就是 1.0.0.0)
-            // 那么它们相等。如果你把远程改成 beta 1.0.1，就会触发更新。
-            if (remoteVersion > localAsm)
+            if (remoteVersion > localVersion)
             {
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    MessageBox.Show($"发现新版本：{remoteRaw}\n当前版本：v{localAsm.Major}.{localAsm.Minor}.{localAsm.Build}\n\n请前往 GitHub 下载最新版本。", "发现更新", MessageBoxButton.OK, MessageBoxImage.Information);
+                    MessageBox.Show($"发现新版本：{displayVersion}\n当前版本：v {LocalVersionStr}\n\n请前往 GitHub 下载最新版本。", "发现更新", MessageBoxButton.OK, MessageBoxImage.Information);
                 });
             }
             else
             {
-                if (isManual)
-                {
-                    await Dispatcher.InvokeAsync(() =>
-                    {
-                        MessageBox.Show($"当前已是最新版本 v{localAsm.Major}.{localAsm.Minor}.{localAsm.Build}。\n(远程版本内容: {remoteRaw})", "检查更新", MessageBoxButton.OK, MessageBoxImage.Information);
-                    });
-                }
+                if (isManual) MessageBox.Show($"当前已是最新版本 v {LocalVersionStr}。\n(远程: {remoteRaw})", "检查更新");
             }
         }
 
@@ -253,14 +263,7 @@ namespace WPFbilibili
             return Version.TryParse(numericPart, out version);
         }
 
-        private void OnMinimizeClick(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
-        private void OnMaximizeClick(object sender, RoutedEventArgs e)
-        {
-            WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
-            MaximizeIcon.Text = WindowState == WindowState.Maximized ? "\uE923" : "\uE922";
-        }
-        private void OnCloseClick(object sender, RoutedEventArgs e) => Close();
-
+        // ================= 基础工具与登录 =================
         private int GetSafeInt(JsonElement element)
         {
             if (element.ValueKind == JsonValueKind.Number) return element.GetInt32();
@@ -268,14 +271,14 @@ namespace WPFbilibili
             return 0;
         }
 
-        private void SaveCredential() => System.IO.File.WriteAllText(CredFile, JsonSerializer.Serialize(new { sessData, biliJct }));
+        private void SaveCredential() => File.WriteAllText(CredFile, JsonSerializer.Serialize(new { sessData, biliJct }));
         private void LoadCredential()
         {
             try
             {
-                if (System.IO.File.Exists(CredFile))
+                if (File.Exists(CredFile))
                 {
-                    using var doc = JsonDocument.Parse(System.IO.File.ReadAllText(CredFile));
+                    using var doc = JsonDocument.Parse(File.ReadAllText(CredFile));
                     sessData = doc.RootElement.GetProperty("sessData").GetString();
                     biliJct = doc.RootElement.GetProperty("biliJct").GetString();
                     if (!string.IsNullOrEmpty(sessData))
@@ -340,13 +343,10 @@ namespace WPFbilibili
             return string.Join("; ", parts);
         }
 
+        // ================= 个人空间 =================
         private async void BtnMyProfile_Click(object sender, RoutedEventArgs e)
         {
-            if (string.IsNullOrEmpty(sessData))
-            {
-                MessageBox.Show("请先点击右上角登录！", "提示");
-                return;
-            }
+            if (string.IsNullOrEmpty(sessData)) { MessageBox.Show("请先点击右上角登录！", "提示"); return; }
             try
             {
                 string myMid = await GetMyMidAsync();
@@ -365,13 +365,11 @@ namespace WPFbilibili
             {
                 var paramsDict = new Dictionary<string, string>();
                 string signedQuery = await SignWbiParamsAsync(paramsDict);
-                string url = $"https://api.bilibili.com/x/space/myinfo?{signedQuery}";
-                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/space/myinfo?{signedQuery}");
                 request.Headers.TryAddWithoutValidation("User-Agent", UA);
                 request.Headers.TryAddWithoutValidation("Cookie", BuildBiliCookie());
                 var response = await client.SendAsync(request);
-                string resStr = await response.Content.ReadAsStringAsync();
-                using var doc = JsonDocument.Parse(resStr);
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
                 if (doc.RootElement.GetProperty("code").GetInt32() == 0)
                     return doc.RootElement.GetProperty("data").GetProperty("mid").GetInt64().ToString();
             }
@@ -383,29 +381,162 @@ namespace WPFbilibili
         {
             try
             {
-                string url = $"https://api.bilibili.com/x/space/upstat?mid={mid}";
-                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/space/upstat?mid={mid}");
                 request.Headers.TryAddWithoutValidation("User-Agent", UA);
-                request.Headers.TryAddWithoutValidation("Referer", $"https://space.bilibili.com/{mid}");
                 request.Headers.TryAddWithoutValidation("Cookie", BuildBiliCookie());
 
                 var response = await client.SendAsync(request);
-                string resStr = await response.Content.ReadAsStringAsync();
-                if (resStr.TrimStart().StartsWith("<")) return;
-
-                using var doc = JsonDocument.Parse(resStr);
-                if (doc.RootElement.GetProperty("code").GetInt32() != 0) return;
-
-                var data = doc.RootElement.GetProperty("data");
-                int videoView = GetSafeInt(data.GetProperty("archive").GetProperty("view"));
-
-                await Dispatcher.InvokeAsync(() => {
-                    TxtSpaceView.Text = $"总播放: {FormatCount(videoView)}";
-                });
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                if (doc.RootElement.GetProperty("code").GetInt32() == 0)
+                {
+                    int videoView = GetSafeInt(doc.RootElement.GetProperty("data").GetProperty("archive").GetProperty("view"));
+                    await Dispatcher.InvokeAsync(() => TxtSpaceView.Text = $"总播放: {FormatCount(videoView)}");
+                }
             }
             catch { }
         }
 
+        private async Task LoadSpaceAsync(string mid, string uname)
+        {
+            ResetPlayerState();
+            currentUpMid = mid;
+            currentUpName = uname;
+            currentViewMode = "Space";
+
+            ListViewer.Visibility = Visibility.Collapsed;
+            PlayView.Visibility = Visibility.Collapsed;
+            SpaceView.Visibility = Visibility.Visible;
+
+            TxtSpaceLoading.Visibility = Visibility.Visible;
+            TxtSpaceLoading.Text = "正在加载空间信息...";
+            SpaceVideoGrid.ItemsSource = null;
+
+            TxtSpaceName.Text = uname;
+            TxtSpaceSign.Text = "加载简介...";
+            TxtSpaceView.Text = "总播放: -";
+            ImgSpaceAvatar.ImageSource = null;
+
+            string cookie = BuildBiliCookie();
+
+            try
+            {
+                var paramsDict = new Dictionary<string, string> { { "mid", mid } };
+                string signedQuery = await SignWbiParamsAsync(paramsDict);
+                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/space/wbi/acc/info?{signedQuery}");
+                request.Headers.TryAddWithoutValidation("User-Agent", UA);
+                request.Headers.TryAddWithoutValidation("Referer", $"https://space.bilibili.com/{mid}");
+                if (!string.IsNullOrWhiteSpace(cookie)) request.Headers.TryAddWithoutValidation("Cookie", cookie);
+
+                var response = await client.SendAsync(request);
+                string resStr = await response.Content.ReadAsStringAsync();
+
+                if (!string.IsNullOrWhiteSpace(resStr) && resStr.TrimStart().StartsWith("{"))
+                {
+                    using var doc = JsonDocument.Parse(resStr);
+                    if (doc.RootElement.GetProperty("code").GetInt32() == 0)
+                    {
+                        var data = doc.RootElement.GetProperty("data");
+                        string face = data.TryGetProperty("face", out var f) ? f.GetString() : "";
+                        TxtSpaceName.Text = data.GetProperty("name").GetString();
+
+                        string sign = data.TryGetProperty("sign", out var s) ? s.GetString() : "";
+                        TxtSpaceSign.Text = string.IsNullOrWhiteSpace(sign) ? "这个人很神秘，什么都没写" : sign;
+
+                        if (!string.IsNullOrEmpty(face))
+                        {
+                            if (!face.StartsWith("http")) face = "https:" + face;
+                            ImgSpaceAvatar.ImageSource = new BitmapImage(new Uri(face));
+                        }
+                    }
+                }
+            }
+            catch { TxtSpaceSign.Text = "获取资料失败"; }
+
+            _ = GetUpStatAsync(long.Parse(mid));
+
+            try
+            {
+                var videoParams = new Dictionary<string, string>
+                {
+                    { "mid", mid },
+                    { "ps", "30" },
+                    { "pn", "1" },
+                    { "order", "pubdate" },
+                    { "web_location", "1550101" },
+                    { "dm_img_list", "[]" },
+                    { "dm_img_str", "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ" },
+                    { "dm_cover_img_str", "QU5HTEUgKE5WSURJQSwgTlZJRElBIEdlRm9yY2UgR1RYIDEwNjAgNkdCIERpcmVjdDNEMTEgdnNfNV8wIHBzXzVfMCwgRDNEMTEpR29vZ2xlIEluYy4gKE5WSURJQS)" }
+                };
+
+                string videoQuery = await SignWbiParamsAsync(videoParams);
+                var videoReq = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/space/wbi/arc/search?{videoQuery}");
+                videoReq.Headers.TryAddWithoutValidation("User-Agent", UA);
+                videoReq.Headers.TryAddWithoutValidation("Referer", $"https://space.bilibili.com/{mid}/video");
+                if (!string.IsNullOrWhiteSpace(cookie)) videoReq.Headers.TryAddWithoutValidation("Cookie", cookie);
+
+                var videoRes = await client.SendAsync(videoReq);
+                string videoResStr = await videoRes.Content.ReadAsStringAsync();
+
+                if (string.IsNullOrWhiteSpace(videoResStr) || (!videoResStr.TrimStart().StartsWith("{") && !videoResStr.TrimStart().StartsWith("[")))
+                {
+                    throw new Exception("请求被彻底风控，返回了 HTML。请先点击右上角登录！");
+                }
+
+                using var videoDoc = JsonDocument.Parse(videoResStr);
+                int code = videoDoc.RootElement.GetProperty("code").GetInt32();
+
+                if (code == 0)
+                {
+                    var vlist = videoDoc.RootElement.GetProperty("data").GetProperty("list").GetProperty("vlist");
+                    var list = new List<VideoItem>();
+                    foreach (var item in vlist.EnumerateArray())
+                    {
+                        string pic = item.TryGetProperty("pic", out var coverProp) ? coverProp.GetString() : "";
+                        if (!string.IsNullOrEmpty(pic) && !pic.StartsWith("http")) pic = "https:" + pic;
+
+                        list.Add(new VideoItem
+                        {
+                            Bvid = item.GetProperty("bvid").GetString(),
+                            Title = item.GetProperty("title").GetString(),
+                            Author = TxtSpaceName.Text,
+                            PicUrl = pic,
+                            Duration = FormatDuration(item.TryGetProperty("length", out var durProp) ? GetSafeInt(durProp) : 0),
+                            PlayCount = FormatCount(item.TryGetProperty("play", out var viewProp) ? GetSafeInt(viewProp) : 0),
+                            DanmakuCount = FormatCount(item.TryGetProperty("video_review", out var dmProp) ? GetSafeInt(dmProp) : 0)
+                        });
+                    }
+                    SpaceVideoGrid.ItemsSource = list;
+                    if (list.Count == 0) TxtSpaceLoading.Text = "该UP主暂无投稿视频";
+                    else TxtSpaceLoading.Visibility = Visibility.Collapsed;
+                }
+                else
+                {
+                    string msg = videoDoc.RootElement.TryGetProperty("message", out var m) ? m.GetString() : "未知";
+                    throw new Exception($"接口返回错误 (Code: {code}): {msg}");
+                }
+            }
+            catch (Exception ex)
+            {
+                TxtSpaceLoading.Text = $"加载失败: {ex.Message}";
+            }
+        }
+
+        private async void DetailAuthor_Click(object sender, MouseButtonEventArgs e)
+        {
+            if (string.IsNullOrEmpty(currentUpMid)) return;
+            ResetPlayerState();
+            _spacePreviousView = "PlayView";
+            await LoadSpaceAsync(currentUpMid, currentUpName);
+        }
+
+        private void BtnBackFromSpace_Click(object sender, RoutedEventArgs e)
+        {
+            SpaceView.Visibility = Visibility.Collapsed;
+            if (_spacePreviousView == "PlayView") PlayView.Visibility = Visibility.Visible;
+            else ListViewer.Visibility = Visibility.Visible;
+        }
+
+        // ================= 播放器与弹幕 =================
         private void MediaPlayer_TimeChanged(object sender, MediaPlayerTimeChangedEventArgs e)
         {
             Dispatcher.InvokeAsync(() => {
@@ -414,7 +545,9 @@ namespace WPFbilibili
                     if (SliderProgress.Maximum < e.Time) SliderProgress.Maximum = e.Time;
                     SliderProgress.Value = Math.Max(SliderProgress.Minimum, Math.Min(e.Time, SliderProgress.Maximum));
                     TxtTime.Text = $"{TimeSpan.FromMilliseconds(e.Time):mm\\:ss} / {TimeSpan.FromMilliseconds((long)SliderProgress.Maximum):mm\\:ss}";
-                    if (!currentBvid.StartsWith("LIVE_")) CheckAndTriggerDanmaku(e.Time / 1000.0);
+
+                    if (PlayView.Visibility == Visibility.Visible && !currentBvid.StartsWith("LIVE_"))
+                        CheckAndTriggerDanmaku(e.Time / 1000.0);
                 }
             });
         }
@@ -422,15 +555,19 @@ namespace WPFbilibili
         private void CheckAndTriggerDanmaku(double currentTimeSec)
         {
             if (_lastDanmakuTime >= 0 && currentTimeSec < _lastDanmakuTime - 0.5) _lastDanmakuTime = currentTimeSec - 0.5;
-            double fromTime = _lastDanmakuTime;
-            var pending = _currentDanmakuList.Where(d => d.TimeSec <= currentTimeSec + 0.15 && d.TimeSec > fromTime).ToList();
+
+            var pending = _currentDanmakuList
+                .Where(d => d.TimeSec <= currentTimeSec + 0.15 && d.TimeSec > _lastDanmakuTime)
+                .Take(20)
+                .ToList();
+
             foreach (var dm in pending) AddDanmakuToCanvas(dm.Text, dm.Color);
             _lastDanmakuTime = currentTimeSec;
         }
 
         private void AddDanmakuToCanvas(string text, int colorInt)
         {
-            if (!_danmakuVisible) return;
+            if (!_danmakuVisible || PlayView.Visibility != Visibility.Visible) return;
             try
             {
                 Color color = Colors.White;
@@ -523,6 +660,7 @@ namespace WPFbilibili
         private string FormatCount(int count) => count >= 100000000 ? (count / 100000000.0).ToString("0.#") + "亿" : count >= 10000 ? (count / 10000.0).ToString("0.#") + "万" : count.ToString();
         private string FormatDuration(int sec) => sec >= 3600 ? TimeSpan.FromSeconds(sec).ToString(@"hh\:mm\:ss") : TimeSpan.FromSeconds(sec).ToString(@"mm\:ss");
 
+        // ================= WBI 签名 =================
         private async Task<string> GetWbiKeysAsync()
         {
             if (_mixinKey != null) return _mixinKey;
@@ -560,6 +698,7 @@ namespace WPFbilibili
             return string.Join("&", finalParts);
         }
 
+        // ================= 数据加载 =================
         private async Task LoadHomeAsync(int page, bool reset)
         {
             if (isLoading) return;
@@ -605,122 +744,61 @@ namespace WPFbilibili
             finally { isLoading = false; TxtLoading.Visibility = Visibility.Collapsed; }
         }
 
-        private async Task LoadSpaceAsync(string mid, string uname)
+        // ================= 排行榜 =================
+        private async void BtnNavRank_Click(object sender, RoutedEventArgs e)
         {
-            currentUpMid = mid;
-            currentUpName = uname;
-            currentViewMode = "Space";
-
-            ListViewer.Visibility = Visibility.Collapsed;
+            NavRank.IsChecked = true;
+            ResetPlayerState();
+            currentViewMode = "Rank";
+            ListViewer.Visibility = Visibility.Visible;
             PlayView.Visibility = Visibility.Collapsed;
-            SpaceView.Visibility = Visibility.Visible;
+            SpaceView.Visibility = Visibility.Collapsed;
+            LiveCategoryPanel.Visibility = Visibility.Collapsed;
 
-            TxtSpaceLoading.Visibility = Visibility.Visible;
-            TxtSpaceLoading.Text = "正在加载空间信息...";
-            SpaceVideoGrid.ItemsSource = null;
+            TxtLoading.Visibility = Visibility.Visible;
+            TxtLoading.Text = "加载排行榜中...";
+            VideoGrid.ItemsSource = null;
 
             try
             {
-                var paramsDict = new Dictionary<string, string> { { "mid", mid } };
-                string signedQuery = await SignWbiParamsAsync(paramsDict);
-
-                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/space/wbi/acc/info?{signedQuery}");
+                string url = "https://api.bilibili.com/x/web-interface/ranking/v2";
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
                 request.Headers.TryAddWithoutValidation("User-Agent", UA);
-                request.Headers.TryAddWithoutValidation("Referer", $"https://space.bilibili.com/{mid}");
+                request.Headers.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
                 string cookie = BuildBiliCookie();
                 if (!string.IsNullOrWhiteSpace(cookie)) request.Headers.TryAddWithoutValidation("Cookie", cookie);
 
                 var response = await client.SendAsync(request);
                 string resStr = await response.Content.ReadAsStringAsync();
+                if (resStr.TrimStart().StartsWith("<")) throw new Exception("排行榜接口被风控");
 
-                if (!resStr.TrimStart().StartsWith("<"))
+                using var doc = JsonDocument.Parse(resStr);
+                if (doc.RootElement.GetProperty("code").GetInt32() == 0)
                 {
-                    using var doc = JsonDocument.Parse(resStr);
-                    if (doc.RootElement.GetProperty("code").GetInt32() == 0)
-                    {
-                        var data = doc.RootElement.GetProperty("data");
-                        string name = data.GetProperty("name").GetString();
-                        string face = data.GetProperty("face").GetString();
-                        string sign = data.TryGetProperty("sign", out var s) ? s.GetString() : "这个人很神秘，什么都没写";
-
-                        TxtSpaceName.Text = name;
-                        TxtSpaceSign.Text = sign;
-
-                        if (!string.IsNullOrEmpty(face))
-                        {
-                            if (!face.StartsWith("http")) face = "https:" + face;
-                            ImgSpaceAvatar.ImageSource = new BitmapImage(new Uri(face));
-                        }
-                    }
-                }
-
-                _ = GetUpStatAsync(long.Parse(mid));
-
-                var videoParams = new Dictionary<string, string>
-                {
-                    { "mid", mid }, { "ps", "30" }, { "pn", "1" }, { "order", "pubdate" }
-                };
-                string videoQuery = await SignWbiParamsAsync(videoParams);
-                var videoReq = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/space/wbi/arc/search?{videoQuery}");
-                videoReq.Headers.TryAddWithoutValidation("User-Agent", UA);
-                videoReq.Headers.TryAddWithoutValidation("Referer", $"https://space.bilibili.com/{mid}/video");
-                if (!string.IsNullOrWhiteSpace(cookie)) videoReq.Headers.TryAddWithoutValidation("Cookie", cookie);
-
-                var videoRes = await client.SendAsync(videoReq);
-                string videoResStr = await videoRes.Content.ReadAsStringAsync();
-
-                using var videoDoc = JsonDocument.Parse(videoResStr);
-                if (videoDoc.RootElement.GetProperty("code").GetInt32() == 0)
-                {
-                    var vlist = videoDoc.RootElement.GetProperty("data").GetProperty("list").GetProperty("vlist");
+                    var data = doc.RootElement.GetProperty("data").GetProperty("list");
                     var list = new List<VideoItem>();
-                    foreach (var item in vlist.EnumerateArray())
+                    foreach (var item in data.EnumerateArray())
                     {
-                        string pic = item.TryGetProperty("pic", out var coverProp) ? coverProp.GetString() : "";
+                        string pic = item.GetProperty("pic").GetString();
                         if (!string.IsNullOrEmpty(pic) && !pic.StartsWith("http")) pic = "https:" + pic;
-
-                        int lengthSec = item.TryGetProperty("length", out var durProp) ? GetSafeInt(durProp) : 0;
-                        int playCount = item.TryGetProperty("play", out var viewProp) ? GetSafeInt(viewProp) : 0;
-                        int danmakuCount = item.TryGetProperty("video_review", out var dmProp) ? GetSafeInt(dmProp) : 0;
 
                         list.Add(new VideoItem
                         {
                             Bvid = item.GetProperty("bvid").GetString(),
                             Title = item.GetProperty("title").GetString(),
-                            Author = TxtSpaceName.Text,
+                            Author = item.GetProperty("owner").GetProperty("name").GetString(),
                             PicUrl = pic,
-                            Duration = FormatDuration(lengthSec),
-                            PlayCount = FormatCount(playCount),
-                            DanmakuCount = FormatCount(danmakuCount)
+                            Duration = FormatDuration(item.GetProperty("duration").GetInt32()),
+                            PlayCount = FormatCount(item.GetProperty("stat").GetProperty("view").GetInt32()),
+                            DanmakuCount = FormatCount(item.GetProperty("stat").GetProperty("danmaku").GetInt32())
                         });
                     }
-                    SpaceVideoGrid.ItemsSource = list;
+                    VideoGrid.ItemsSource = list;
+                    ListViewer.ScrollToTop();
                 }
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"获取空间数据失败: {ex.Message}", "提示");
-            }
-            finally
-            {
-                TxtSpaceLoading.Visibility = Visibility.Collapsed;
-            }
-        }
-
-        private async void DetailAuthor_Click(object sender, MouseButtonEventArgs e)
-        {
-            if (string.IsNullOrEmpty(currentUpMid)) return;
-            _spacePreviousView = "PlayView";
-            await LoadSpaceAsync(currentUpMid, currentUpName);
-        }
-
-        private void BtnBackFromSpace_Click(object sender, RoutedEventArgs e)
-        {
-            SpaceView.Visibility = Visibility.Collapsed;
-            if (_spacePreviousView == "PlayView")
-                PlayView.Visibility = Visibility.Visible;
-            else
-                ListViewer.Visibility = Visibility.Visible;
+            catch (Exception ex) { MessageBox.Show($"获取排行榜失败: {ex.Message}"); }
+            finally { TxtLoading.Visibility = Visibility.Collapsed; }
         }
 
         private async Task LoadLiveAsync(int parentAreaId = 0)
@@ -830,6 +908,7 @@ namespace WPFbilibili
             catch (Exception ex) { DetailTitle.Text = "加载失败"; DetailAuthor.Text = ex.Message; DetailDesc.Text = ""; }
         }
 
+        // ================= 视频播放 =================
         private async Task PlayVideoAsync(string bvid, int qn = 127)
         {
             if (isPlayingTaskRunning) return;
@@ -839,46 +918,122 @@ namespace WPFbilibili
                 _ = LoadVideoDanmakuAsync(currentCid);
                 string videoUrl = "";
                 string audioUrl = "";
+                string errorMsg = "";
 
                 try
                 {
-                    var paramsDict = new Dictionary<string, string> { { "bvid", bvid }, { "cid", currentCid }, { "qn", qn.ToString() }, { "fnval", "16" }, { "fourk", "1" }, { "try_look", "1" } };
-                    string signedQuery = await SignWbiParamsAsync(paramsDict);
-                    var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/player/wbi/playurl?{signedQuery}");
+                    string videoPageUrl = $"https://www.bilibili.com/video/{bvid}/";
+                    string encodedUrl = Uri.EscapeDataString(videoPageUrl);
+                    string apiUrl = $"https://api.mir6.com/api/bzjiexi?url={encodedUrl}&type=json";
+
+                    Console.WriteLine($"\n========== [解析请求] 第三方接口 ==========");
+                    Console.WriteLine($"请求地址: {apiUrl}");
+
+                    var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
                     request.Headers.TryAddWithoutValidation("User-Agent", UA);
-                    request.Headers.TryAddWithoutValidation("Referer", $"https://www.bilibili.com/video/{bvid}");
-                    string cookie = BuildBiliCookie();
-                    if (!string.IsNullOrWhiteSpace(cookie)) request.Headers.TryAddWithoutValidation("Cookie", cookie);
 
                     var res = await client.SendAsync(request);
-                    string responseStr = await res.Content.ReadAsStringAsync();
+                    string jsonStr = await res.Content.ReadAsStringAsync();
 
-                    if (!string.IsNullOrWhiteSpace(responseStr) && !responseStr.TrimStart().StartsWith("<"))
+                    Console.WriteLine($"返回数据: {jsonStr}");
+
+                    if (!string.IsNullOrWhiteSpace(jsonStr) && !jsonStr.TrimStart().StartsWith("<"))
                     {
-                        using var playDoc = JsonDocument.Parse(responseStr);
-                        if (playDoc.RootElement.GetProperty("code").GetInt32() == 0 && playDoc.RootElement.TryGetProperty("data", out var playData))
+                        using var doc = JsonDocument.Parse(jsonStr);
+                        int code = doc.RootElement.TryGetProperty("code", out var codeProp) ? codeProp.GetInt32() : -1;
+
+                        if (code == 200 && doc.RootElement.TryGetProperty("data", out var dataArray) && dataArray.GetArrayLength() > 0)
                         {
-                            if (playData.TryGetProperty("dash", out var dash))
+                            var firstVideo = dataArray[0];
+                            if (firstVideo.TryGetProperty("video_url", out var urlProp))
                             {
-                                if (dash.TryGetProperty("video", out var videos) && videos.GetArrayLength() > 0) videoUrl = videos[0].GetProperty("baseUrl").GetString();
-                                if (dash.TryGetProperty("audio", out var audios) && audios.GetArrayLength() > 0) audioUrl = audios[0].GetProperty("baseUrl").GetString();
+                                videoUrl = urlProp.GetString();
                             }
+                        }
+                        else
+                        {
+                            string msg = doc.RootElement.TryGetProperty("msg", out var msgProp) ? msgProp.GetString() : "未知错误";
+                            errorMsg = $"第三方解析失败: {msg} (Code: {code})";
                         }
                     }
                 }
-                catch { }
+                catch (Exception ex) { errorMsg += $" 第三方解析异常: {ex.Message};"; }
 
-                if (string.IsNullOrEmpty(videoUrl)) throw new Exception("视频直链解析失败。");
+                if (string.IsNullOrEmpty(videoUrl))
+                {
+                    try
+                    {
+                        var paramsDict = new Dictionary<string, string> {
+                            { "bvid", bvid }, { "cid", currentCid }, { "qn", qn.ToString() },
+                            { "fnval", "16" }, { "fourk", "1" }, { "try_look", "1" }
+                        };
+                        string signedQuery = await SignWbiParamsAsync(paramsDict);
+                        string apiUrl = $"https://api.bilibili.com/x/player/wbi/playurl?{signedQuery}";
+
+                        Console.WriteLine($"\n========== [解析请求] 官方 WBI 接口 ==========");
+                        Console.WriteLine($"请求地址: {apiUrl}");
+
+                        var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                        request.Headers.TryAddWithoutValidation("User-Agent", UA);
+                        request.Headers.TryAddWithoutValidation("Referer", $"https://www.bilibili.com/video/{bvid}");
+                        string cookie = BuildBiliCookie();
+                        if (!string.IsNullOrWhiteSpace(cookie)) request.Headers.TryAddWithoutValidation("Cookie", cookie);
+
+                        var res = await client.SendAsync(request);
+                        string responseStr = await res.Content.ReadAsStringAsync();
+
+                        Console.WriteLine($"返回数据: {responseStr}");
+
+                        if (!string.IsNullOrWhiteSpace(responseStr) && !responseStr.TrimStart().StartsWith("<"))
+                        {
+                            using var playDoc = JsonDocument.Parse(responseStr);
+                            if (playDoc.RootElement.GetProperty("code").GetInt32() == 0 && playDoc.RootElement.TryGetProperty("data", out var playData))
+                            {
+                                if (playData.TryGetProperty("dash", out var dash))
+                                {
+                                    if (dash.TryGetProperty("video", out var videos) && videos.GetArrayLength() > 0)
+                                    {
+                                        videoUrl = videos[0].GetProperty("baseUrl").GetString();
+                                    }
+                                    if (dash.TryGetProperty("audio", out var audios) && audios.GetArrayLength() > 0)
+                                    {
+                                        audioUrl = audios[0].GetProperty("baseUrl").GetString();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex) { Console.WriteLine($"[解析] 官方异常: {ex.Message}"); }
+                }
+
+                if (string.IsNullOrEmpty(videoUrl))
+                {
+                    throw new Exception($"视频直链解析失败！\n详细信息: {errorMsg}\n\n原因：第三方接口和官方接口均无法获取链接。");
+                }
+
+                Console.WriteLine($"\n========== [解析成功] 准备播放 ==========");
+                Console.WriteLine($"完整视频地址: {videoUrl}");
+                if (!string.IsNullOrEmpty(audioUrl))
+                {
+                    Console.WriteLine($"完整音频地址: {audioUrl}");
+                }
+                Console.WriteLine($"==========================================\n");
+
                 var newMedia = new LibVLCSharp.Shared.Media(_libVlc, new Uri(videoUrl));
+                if (!string.IsNullOrEmpty(audioUrl)) newMedia.AddOption(":input-slave=" + audioUrl);
+
                 newMedia.AddOption(":network-caching=2000");
                 newMedia.AddOption(":http-referrer=https://www.bilibili.com/");
                 newMedia.AddOption(":http-user-agent=" + UA);
-                if (!string.IsNullOrEmpty(audioUrl)) newMedia.AddOption(":input-slave=" + audioUrl);
 
                 _mediaPlayer.Play(newMedia);
                 BtnPlayPause.Content = "⏸";
             }
-            catch (Exception ex) { MessageBox.Show($"播放失败: {ex.Message}", "错误"); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n[播放失败] {ex.Message}");
+                MessageBox.Show(ex.Message, "视频播放失败", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
             finally { isPlayingTaskRunning = false; }
         }
 
@@ -917,6 +1072,7 @@ namespace WPFbilibili
             catch (Exception ex) { MessageBox.Show($"直播播放失败: {ex.Message}"); }
         }
 
+        // ================= 评论与发送 =================
         private void UpdateCommentMoreButton()
         {
             BtnLoadMoreComments.Visibility = !string.IsNullOrEmpty(commentPaginationOffset) ? Visibility.Visible : Visibility.Collapsed;
@@ -1049,6 +1205,7 @@ namespace WPFbilibili
             finally { _isSendingDanmaku = false; BtnSendDanmaku.IsEnabled = true; }
         }
 
+        // ================= 导航与交互 =================
         private void BtnNavHome_Click(object sender, RoutedEventArgs e) { NavHome.IsChecked = true; ResetPlayerState(); _ = LoadHomeAsync(1, true); }
         private void BtnNavLive_Click(object sender, RoutedEventArgs e) { NavLive.IsChecked = true; ResetPlayerState(); _ = LoadLiveAsync(0); }
 
@@ -1071,8 +1228,11 @@ namespace WPFbilibili
         private void ResetPlayerState()
         {
             _danmakuClient?.Close(); _danmakuClient = null;
-            _currentDanmakuList.Clear(); DanmakuCanvas.Children.Clear(); _lastDanmakuTime = -1;
+            _currentDanmakuList.Clear();
+            DanmakuCanvas.Children.Clear();
+            _lastDanmakuTime = -1;
             _mediaPlayer?.Stop();
+
             BtnPlayPause.Content = "▶"; SliderProgress.Value = 0; TxtTime.Text = "00:00 / 00:00";
             DetailDesc.Text = ""; commentPaginationOffset = ""; isCommentLoading = false;
             _commentTotal = 0; _comments.Clear(); TxtCommentHeader.Text = "热门评论";
@@ -1111,13 +1271,16 @@ namespace WPFbilibili
             string keyword = TxtSearch.Text.Trim();
             if (string.IsNullOrWhiteSpace(keyword)) return;
 
+            // ★ 当点击搜索时，自动呼出 CMD 日志窗口
+            ShowLogConsole();
+
             if (Regex.IsMatch(keyword, @"^[Bb][Vv]1[0-9a-zA-Z]{9}$"))
             {
                 currentBvid = keyword; ListViewer.Visibility = Visibility.Collapsed; SpaceView.Visibility = Visibility.Collapsed; PlayView.Visibility = Visibility.Visible;
                 ResetPlayerState(); _ = LoadDetailsAsync(keyword); return;
             }
 
-            NavHome.IsChecked = false; NavLive.IsChecked = false; NavMine.IsChecked = false;
+            NavHome.IsChecked = false; NavLive.IsChecked = false; NavMine.IsChecked = false; NavRank.IsChecked = false;
             currentViewMode = "Search";
             ListViewer.Visibility = Visibility.Visible; PlayView.Visibility = Visibility.Collapsed; SpaceView.Visibility = Visibility.Collapsed;
             TxtLoading.Visibility = Visibility.Visible; TxtLoading.Text = $"正在搜索：{keyword}...";
@@ -1127,7 +1290,13 @@ namespace WPFbilibili
             {
                 var paramsDict = new Dictionary<string, string> { { "keyword", keyword }, { "search_type", "video" }, { "page", "1" } };
                 string signedQuery = await SignWbiParamsAsync(paramsDict);
-                var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.bilibili.com/x/web-interface/wbi/search/type?{signedQuery}");
+                string apiUrl = $"https://api.bilibili.com/x/web-interface/wbi/search/type?{signedQuery}";
+
+                Console.WriteLine($"\n========== [搜索请求] ==========");
+                Console.WriteLine($"关键字: {keyword}");
+                Console.WriteLine($"完整请求地址: {apiUrl}");
+
+                var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
                 request.Headers.TryAddWithoutValidation("User-Agent", UA);
                 request.Headers.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
                 string cookie = BuildBiliCookie();
@@ -1135,6 +1304,10 @@ namespace WPFbilibili
 
                 var res = await client.SendAsync(request);
                 string resStr = await res.Content.ReadAsStringAsync();
+
+                Console.WriteLine($"\n========== [搜索返回] ==========");
+                Console.WriteLine($"完整返回JSON: {resStr}");
+
                 if (resStr.TrimStart().StartsWith("<")) throw new Exception("搜索被风控");
 
                 using var doc = JsonDocument.Parse(resStr);
@@ -1162,7 +1335,11 @@ namespace WPFbilibili
                 }
                 VideoGrid.ItemsSource = list; ListViewer.ScrollToTop();
             }
-            catch (Exception ex) { MessageBox.Show($"搜索失败: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"\n[搜索失败] {ex.Message}");
+                MessageBox.Show($"搜索失败: {ex.Message}");
+            }
             finally { TxtLoading.Visibility = Visibility.Collapsed; }
         }
 
